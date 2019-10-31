@@ -1,0 +1,122 @@
+#!/bin/sh
+#
+# Copyright (C) 2019 Richard Yu <yurichard3839@gmail.com>
+#
+# This is free software, licensed under the GNU General Public License v3.
+# See /LICENSE for more information.
+#
+
+. /lib/functions.sh
+
+conf=shadowsocksr-libev
+insecure=0
+
+log() {
+	echo $@
+	logger -t ssr-sub $@
+}
+
+check_curl_wget() {
+	local curl_path=$(which curl)
+	if [ $? = 0 ]; then # have curl
+		fetch="$curl_path"
+		[ $insecure = 0 ] || fetch="$fetch -k"
+	else
+		local wget_path=$(which wget)
+		if [ $? = 0 ]; then # have wget
+			fetch="$wget_path -O-"
+			[ $insecure = 0 ] || fetch="$fetch --no-check-certificate"
+			[ -f "/lib/libustream-ssl.so" ] || log "Warning: wget ssl support not installed"
+		fi
+	fi
+}
+
+b64url_dec() {
+	local s="===="
+	local l=$((${#1} % 4))
+	[ $l = 0 ] && s= || s=${s:l}
+	echo "$1$s" | tr '_-' '/+' | base64 -d
+}
+
+add_server() {
+	cat <<EOF > "$cfgfile"
+config server
+	option server '$server'
+	option server_port '$port'
+	option password '$password'
+	option method '$method'
+	option protocol '$protocol'
+	option protocol_param '$protoparam'
+	option obfs '$obfs'
+	option obfs_param '$obfsparam'
+	option remarks '$remarks'
+	option group '$group'
+
+EOF
+}
+
+parse_link() {
+	local link="$1"
+	if [ "${link::6}" = "ssr://" ]; then
+		link=$(b64url_dec "${link:6}")
+
+		IFS=':'; set -- ${link%%/*}; IFS=' '
+		local vars="server port protocol method obfs password"
+		local $vars
+		for var in $vars; do
+			eval "$var=$1"; shift
+		done
+		password=$(b64url_dec "$password")
+
+		vars="obfsparam protoparam remarks group"
+		local $vars
+		IFS='&'
+		for param in ${link#*/?}; do
+			IFS='='; set -- $param
+			local value=$(b64url_dec "$2")
+			case "$1" in
+				obfsparam)
+					obfsparam="$value"
+				;;
+				protoparam)
+					protoparam="$value"
+				;;
+				remarks)
+					remarks="$value"
+				;;
+				group)
+					group="$value"
+				;;
+			esac
+		done
+		add_server
+	fi
+}
+
+update_subscribe() {
+	local section="$1"
+	local url
+	config_get url "$section" url
+
+	local data=$($fetch "$url")
+	data=$(b64url_dec "$data")
+	if [ $? = 0 ]; then
+		local cfgfile="/etc/config/${section}-ssrsub"
+		echo > "$cfgfile"
+
+		IFS="$N"
+		for line in $data; do
+			parse_link "$line"
+		done
+	fi
+}
+
+foreach_subscribe() {
+	update_subscribe $@ &
+}
+
+check_curl_wget
+
+config_load "$conf"
+config_foreach foreach_subscribe ssr_sub
+wait
